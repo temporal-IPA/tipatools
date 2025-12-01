@@ -1,0 +1,4 @@
+github.com/temporal-IPA/tipa v1.0.0 h1:RY/tDECNcqEBcig/5g53RLU3v3s+f1wdiiXQZG6wWZE=
+github.com/temporal-IPA/tipa v1.0.0/go.mod h1:+Lc1KVsFAk41gRrz0zKFYy4uHiUSt7xt3T5qYhm3hqc=
+golang.org/x/net v0.47.0 h1:Mx+4dIFzqraBXUugkia1OOvlD6LemFo1ALMHjrXDOhY=
+golang.org/x/net v0.47.0/go.mod h1:/jNxtkgq5yWUGYkaZGqo27cfGZ1c5Nen03aYrrKpVRU=
