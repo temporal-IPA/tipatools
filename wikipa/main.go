@@ -1,4 +1,4 @@
-// Command wikipa builds a pronunciation dictionary from a Wiktionary or Wikipedia dump.
+// The command "wikipa" builds a pronunciation dictionary from a Wiktionary or Wikipedia dump.
 //
 // It scans an XML (uncompressed or .bz2, local or HTTP/HTTPS) and
 // extracts IPA pronunciations from {{pron|...|<lang>}} and {{API|...|<lang>}}
@@ -8,22 +8,17 @@
 //
 // Example usages:
 //
-//   # Old-style usage (still supported):
-//   #   wikipa <dump.xml[.bz2]>
-//   # which is equivalent to:
-//   wikipa parse frwiktionary-latest-pages-articles.xml.bz2 > exports/fr.dict.txt
-//
-//   # Explicit text export (default):
+//   # Explicit text export (French):
 //   wikipa parse --lang fr --export text frwiktionary-latest-pages-articles.xml.bz2 > exports/fr.dict.txt
 //
 //   # English dictionary example (Wiktionary):
 //   wikipa parse --lang en --export text enwiktionary-latest-pages-articles.xml.bz2 > exports/en.dict.txt
 //
 //   # Gob export (binary map[string][]string):
-//   wikipa parse --export gob frwiktionary-latest-pages-articles.xml.bz2 > exports/fr.dict.gob
+//   wikipa parse --lang fr --export gob frwiktionary-latest-pages-articles.xml.bz2 > exports/fr.dict.gob
 //
 //   # Merge with a pre-existing dictionary (text or gob):
-//   wikipa parse --lang fr --preload fr.dict.txt frwiktionary-new-pages-articles.xml.bz2 > exports/merged.dict.txt
+//   wikipa parse --lang fr --preload fr.dict.txt --merge-append frwiktionary-new-pages-articles.xml.bz2 > exports/merged.dict.txt
 //
 //   # Stream directly from Wikimedia dumps over HTTPS (no local file):
 //   wikipa parse --lang fr https://dumps.wikimedia.org/frwiktionary/latest/frwiktionary-latest-pages-articles.xml.bz2 > exports/fr.dict.txt
@@ -50,6 +45,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/temporal-IPA/tipa/pkg/ipa"
 	"golang.org/x/net/html"
@@ -67,6 +63,12 @@ var headwordRegex = regexp.MustCompile(`'''([^']+)'''`)
 //	{{pron|pʁɔ̃|fr}}, {{pron|pʁɔ̃|pʁã|fr}}, {{API|…|fr}}
 var pronTemplateRegex = regexp.MustCompile(`\{\{(?:pron|API)\|([^}]*)\}\}`)
 
+// htmlTagRegexp strips HTML-ish tags like <small>…</small>, <sup>6</sup>, <span...>, etc.
+var htmlTagRegexp = regexp.MustCompile(`<[^>]+>`)
+
+// interwikiPrefixRegex strips prefixes like :fr:foo, :en:bar, :it:JeanJean.
+var interwikiPrefixRegex = regexp.MustCompile(`^:([a-z]{2,3}):(.+)$`)
+
 // --- CLI help / usage -------------------------------------------------------
 
 const helpText = `wikipa - Wiktionary / Wikipedia IPA pronunciation scanner
@@ -78,10 +80,6 @@ Usage:
   wikipa parse [flags] <path-or-URL>
       Parse a local dump file or an HTTP/HTTPS URL and emit a
       pronunciation dictionary.
-
-If no subcommand is given and the first argument does not start with '-',
-"wikipa <dump>" is treated as:
-  wikipa parse <dump>
 
 Flags for "parse":
   --lang CODE
@@ -110,10 +108,18 @@ Flags for "parse":
       Entries from PATH are combined with the newly scanned dump using one of
       the merge modes below.
 
+  --merge-append
+      Merge new pronunciations into the existing dictionary by appending them
+      after existing entries (default). New pronunciations for a word are added
+      at the end of the existing list, with de-duplication on (word, pronunciation).
+
+  --merge-prepend
+      Merge new pronunciations by prepending them before existing entries for
+      each word. This is useful when the newly parsed dump should have higher
+      priority than the preloaded dictionary.
+
   --merge
-      Merge new pronunciations into the existing dictionary (default).
-      New pronunciations for a word are added to the existing entry, with
-      de-duplication on (word, pronunciation).
+      Alias for --merge-append (kept for backward compatibility).
 
   --no-override
       Do not change entries for words that already exist in the preloaded
@@ -144,10 +150,13 @@ Examples:
   wikipa parse --lang en enwiktionary-latest-pages-articles.xml.bz2 > exports/en.dict.txt
 
   # Explicit gob export
-  wikipa parse --export gob frwiktionary-latest-pages-articles.xml.bz2 > exports/fr.dict.gob
+  wikipa parse --lang fr --export gob frwiktionary-latest-pages-articles.xml.bz2 > exports/fr.dict.gob
 
-  # Merge an existing French dictionary with a new dump (default merge mode)
-  wikipa parse --lang fr --preload fr.dict.txt frwiktionary-new-pages-articles.xml.bz2 > exports/merged.dict.txt
+  # Merge an existing French dictionary with a new dump (append new pronunciations)
+  wikipa parse --lang fr --preload fr.dict.txt --merge-append frwiktionary-new-pages-articles.xml.bz2 > exports/merged.dict.txt
+
+  # Preload a reference dictionary, then prepend user overrides from a new dump
+  wikipa parse --lang fr --preload reference.dict.txt --merge-prepend user-overrides.xml.bz2 > exports/fr.overrides_first.dict.txt
 
   # Do not touch words that already exist in the preloaded dictionary
   wikipa parse --lang fr --preload fr.dict.txt --no-override frwiktionary-new-pages-articles.xml.bz2 > exports/fr.dict.txt
@@ -254,7 +263,7 @@ func openSource(pathOrURL string) (io.ReadCloser, error) {
 // It performs a fast local de-duplication per line to reduce downstream work,
 // and only keeps parameters that both:
 //   - appear before the language marker, and
-//   - contain at least one character from ipaChars.
+//   - contain at least one character from ipa.Charset.
 func extractPronunciationsFromLine(line string, lang string) []string {
 	// Extract all pron/API templates from the line in one pass.
 	matches := pronTemplateRegex.FindAllStringSubmatch(line, -1)
@@ -331,6 +340,75 @@ var replace = []string{
 
 var replacer = strings.NewReplacer(replace...)
 
+// normalizeHeadword cleans and filters a raw headword string.
+//
+// It:
+//   - decodes HTML entities,
+//   - strips HTML-ish tags (<small>, <sup>, malformed <spanstyle=...>, ...),
+//   - strips interwiki prefixes like :fr:foo, :en:bar,
+//   - applies the replacer (removing spaces, [], {}, +, (), |),
+//   - trims simple trailing punctuation,
+//   - rejects lines that look like bullets (#...) or contain no letters,
+//   - rejects tiny slash-based artifacts like "s/s".
+func normalizeHeadword(raw string) string {
+	if raw == "" {
+		return ""
+	}
+
+	// Decode HTML entities (&#43; -> +, &eacute; -> é, etc.).
+	raw = html.UnescapeString(raw)
+
+	// Strip HTML-ish tags.
+	raw = htmlTagRegexp.ReplaceAllString(raw, "")
+	raw = strings.TrimSpace(raw)
+
+	// Strip interwiki prefixes like :fr:atchourissage -> atchourissage.
+	if m := interwikiPrefixRegex.FindStringSubmatch(raw); len(m) == 3 {
+		raw = strings.TrimSpace(m[2])
+	}
+
+	// Apply basic replacer (removes spaces, [], {}, +, (), |).
+	raw = replacer.Replace(raw)
+	raw = strings.TrimSpace(raw)
+
+	if raw == "" {
+		return ""
+	}
+
+	// Drop wiki list / heading artifacts like "#Prononciationdumotmoelleux."
+	if strings.HasPrefix(raw, "#") {
+		return ""
+	}
+
+	// Trim simple trailing punctuation often coming from titles.
+	raw = strings.Trim(raw, ".,;:")
+
+	if raw == "" {
+		return ""
+	}
+
+	// Require at least one letter.
+	hasLetter := false
+	letterCount := 0
+	for _, r := range raw {
+		if unicode.IsLetter(r) {
+			hasLetter = true
+			letterCount++
+		}
+	}
+	if !hasLetter {
+		return ""
+	}
+
+	// Drop tiny slash-based artifacts (e.g. "s/s") while keeping more substantial
+	// things like "et/ou" if they ever appear.
+	if strings.Contains(raw, "/") && letterCount <= 2 {
+		return ""
+	}
+
+	return raw
+}
+
 // extractHeadwordFromLine returns a normalized headword for the current line,
 // falling back to the page title when no explicit ”'headword”' is present.
 //
@@ -343,8 +421,7 @@ func extractHeadwordFromLine(line, title string) string {
 	if m := headwordRegex.FindStringSubmatch(line); len(m) > 1 {
 		raw = strings.TrimSpace(m[1])
 	}
-	raw = html.UnescapeString(raw)
-	return replacer.Replace(raw)
+	return normalizeHeadword(raw)
 }
 
 // --- Dictionary preload / export helpers ------------------------------------
@@ -354,7 +431,8 @@ func extractHeadwordFromLine(line, title string) string {
 type mergeMode int
 
 const (
-	mergeModeMerge mergeMode = iota
+	mergeModeAppend mergeMode = iota
+	mergeModePrepend
 	mergeModeNoOverride
 	mergeModeReplace
 )
@@ -367,8 +445,7 @@ const (
 //   - Text dictionary produced by this tool (one "<word>\t<IPA1> | <IPA2>..." per line).
 //
 // preloadedWords is populated with all words that originate from PATH.
-// This information is later used to decide how to handle --no-override and
-// --replace merge modes.
+// This information is later used to decide how to handle the merge modes.
 func preloadDictionary(path string, entries map[string][]string, seenWordPron map[string]struct{}, preloadedWords map[string]struct{}) error {
 	f, err := os.Open(path)
 	if err != nil {
@@ -483,7 +560,7 @@ func writeGobDictionary(w io.Writer, entries map[string][]string) error {
 // scanDump reads a dump from reader, updating entries and seenWordPron in place.
 //
 // preloadedWords contains all words that came from a preloaded dictionary
-// (if any) and is used to implement --no-override and --replace merge modes.
+// (if any) and is used to implement the merge modes.
 //
 // It returns:
 //   - lineCount: number of lines scanned from the dump,
@@ -594,7 +671,15 @@ func scanDump(
 				continue
 			}
 			seenWordPron[key] = struct{}{}
-			entries[word] = append(entries[word], p)
+
+			switch mode {
+			case mergeModePrepend:
+				// New pronunciations come first.
+				entries[word] = append([]string{p}, entries[word]...)
+			default:
+				// Append mode (including no-override & replace).
+				entries[word] = append(entries[word], p)
+			}
 		}
 	}
 
@@ -613,7 +698,7 @@ type parseConfig struct {
 	ExportFormat string    // "text" or "gob"
 	PreloadPath  string    // optional, may be empty
 	Lang         string    // language code used in pron/API templates
-	MergeMode    mergeMode // merge, no-override, replace
+	MergeMode    mergeMode // append, prepend, no-override, replace
 }
 
 // runParse executes a parse according to cfg and writes the result to stdout.
@@ -686,7 +771,10 @@ func runParseFromArgs(args []string) error {
 	preloadPath := fs.String("preload", "", "optional dictionary to preload (text or gob)")
 	lang := fs.String("lang", "fr", "language code to match in pron/API templates (e.g. fr, en, es, de)")
 
-	mergeFlag := fs.Bool("merge", false, "merge new pronunciations into existing entries (default)")
+	mergeFlag := fs.Bool("merge", false, "alias for --merge-append (merge new pronunciations by appending them)")
+	mergeAppendFlag := fs.Bool("merge-append", false, "merge new pronunciations into existing entries by appending them (default)")
+	mergePrependFlag := fs.Bool("merge-prepend", false, "merge new pronunciations by prepending them before existing entries")
+
 	noOverrideFlag := fs.Bool("no-override", false, "do not change entries for words that already exist in the preloaded dictionary")
 	// Optional compatibility flag for the misspelled variant.
 	noOverrideCompat := fs.Bool("no-overide", false, "alias for --no-override")
@@ -709,11 +797,16 @@ func runParseFromArgs(args []string) error {
 		return errors.New(`"parse" expects exactly one <path-or-URL> argument`)
 	}
 
-	// Determine merge mode; default to merge.
-	mode := mergeModeMerge
+	// Determine merge mode; default to append.
+	mode := mergeModeAppend
 	selected := 0
-	if *mergeFlag {
-		mode = mergeModeMerge
+
+	if *mergeFlag || *mergeAppendFlag {
+		mode = mergeModeAppend
+		selected++
+	}
+	if *mergePrependFlag {
+		mode = mergeModePrepend
 		selected++
 	}
 	if *noOverrideFlag || *noOverrideCompat {
@@ -724,8 +817,9 @@ func runParseFromArgs(args []string) error {
 		mode = mergeModeReplace
 		selected++
 	}
+
 	if selected > 1 {
-		return errors.New("only one of --merge, --no-override/--no-overide, or --replace may be specified")
+		return errors.New("only one of --merge/--merge-append, --merge-prepend, --no-override/--no-overide, or --replace may be specified")
 	}
 
 	cfg := parseConfig{
@@ -743,24 +837,6 @@ func main() {
 	if len(os.Args) < 2 {
 		printUsage(os.Stderr)
 		os.Exit(1)
-	}
-
-	// Support the classic "wikipa <dump>" usage by treating it as
-	// "wikipa parse <dump>" when no subcommand is given.
-	if len(os.Args) == 2 &&
-		!strings.HasPrefix(os.Args[1], "-") &&
-		os.Args[1] != "help" &&
-		os.Args[1] != "parse" {
-		cfg := parseConfig{
-			Source:       os.Args[1],
-			ExportFormat: "text",
-			Lang:         "fr",
-			MergeMode:    mergeModeMerge,
-		}
-		if err := runParse(cfg); err != nil {
-			log.Fatal(err)
-		}
-		return
 	}
 
 	switch os.Args[1] {
