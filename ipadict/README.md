@@ -1,7 +1,8 @@
-# wikipa
+# ipadict
 
-`wikipa` is a small command‑line tool that builds IPA pronunciation dictionaries
-from Wiktionary / Wikipedia XML dumps.
+`ipadict` is a small command‑line tool that builds IPA pronunciation dictionaries
+from Wiktionary / Wikipedia XML dumps, and various other sources.
+
 
 It scans a dump (local file or HTTP/HTTPS URL, optionally bzip2‑compressed),
 extracts IPA pronunciations from `{{pron|...}}` / `{{API|...}}` templates for a
@@ -17,13 +18,13 @@ This also applies to HTTP/HTTPS URLs (no temporary files).
 
 ## Installation
 
-From the `tipatools/wikipa` directory:
+From the `tipatools/ipadict` directory:
 
 ```bash
-go build -o bin/wikipa main.go
+go build -o bin/ipadict main.go
 ```
 
-This will produce a `bin/wikipa` binary.
+This will produce a `bin/ipadict` binary.
 
 You can also install it in your `$GOBIN`:
 
@@ -41,27 +42,27 @@ module root and adjust the path accordingly).
 General form:
 
 ```bash
-wikipa parse [flags] <path-or-URL>
+ipadict parse [flags] <path-or-URL>
 ```
 
 Examples:
 
 ```bash
 # French Wiktionary (local file, text export)
-wikipa parse --lang fr   --export text   frwiktionary-latest-pages-articles.xml.bz2   > exports/fr.dict.txt
+ipadict parse --lang fr   --export text   frwiktionary-latest-pages-articles.xml.bz2   > exports/fr.dict.txt
 
 # English Wiktionary (local file, text export)
-wikipa parse --lang en   --export text   enwiktionary-latest-pages-articles.xml.bz2   > exports/en.dict.txt
+ipadict parse --lang en   --export text   enwiktionary-latest-pages-articles.xml.bz2   > exports/en.dict.txt
 
 # French Wiktionary (HTTPS stream – no local file)
-wikipa parse --lang fr   https://dumps.wikimedia.org/frwiktionary/latest/frwiktionary-latest-pages-articles.xml.bz2   > exports/fr.dict.txt
+ipadict parse --lang fr   https://dumps.wikimedia.org/frwiktionary/latest/frwiktionary-latest-pages-articles.xml.bz2   > exports/fr.dict.txt
 ```
 
 ---
 
 ## Input formats
 
-`wikipa` accepts:
+`ipadict` accepts:
 
 - **Local files**
     - Plain XML: `*.xml`
@@ -101,7 +102,7 @@ Select with `--export`:
   reload the dictionary directly in Go:
 
   ```bash
-  wikipa parse --lang fr --export gob dump.xml.bz2 > exports/fr.dict.gob
+  ipadict parse --lang fr --export gob dump.xml.bz2 > exports/fr.dict.gob
   ```
 
   In Go:
@@ -125,13 +126,13 @@ Use `--lang` to select which language code to match in templates:
 
 ```bash
 # French
-wikipa parse --lang fr ...
+ipadict parse --lang fr ...
 
 # English
-wikipa parse --lang en ...
+ipadict parse --lang en ...
 
 # Spanish
-wikipa parse --lang es ...
+ipadict parse --lang es ...
 ```
 
 The scanner looks for templates like:
@@ -143,7 +144,7 @@ The scanner looks for templates like:
 and only keeps parameters **before** the `<lang>` code that contain at least one
 IPA character (as defined by the TIPA spec / `ipa.Charset`).
 
-This makes `wikipa` usable for multiple languages as long as the dumps contain
+This makes `ipadict` usable for multiple languages as long as the dumps contain
 standard `pron` / `API` templates with a language code.
 
 ---
@@ -153,15 +154,15 @@ standard `pron` / `API` templates with a language code.
 You can preload an existing dictionary and then merge the new dump into it.
 
 ```bash
-wikipa parse --lang fr   --preload exports/user.dict.txt   --merge-append   frwiktionary-latest-pages-articles.xml.bz2   > exports/fr.merged.dict.txt
+ipadict parse --lang fr   --preload exports/user.dict.txt   --merge-append   frwiktionary-latest-pages-articles.xml.bz2   > exports/fr.merged.dict.txt
 ```
 
 ### `--preload PATH`
 
 `PATH` can be:
 
-- a text dictionary produced by `wikipa`, or
-- a gob dictionary produced by `wikipa parse --export gob`.
+- a text dictionary produced by `ipadict`, or
+- a gob dictionary produced by `ipadict parse --export gob`.
 
 The preloaded dictionary is combined with the newly scanned dump according to a
 **merge mode**.
@@ -209,7 +210,7 @@ If no merge mode flag is given, `--merge-append` is used.
 
 ## Progress reporting
 
-When scanning very large dumps, `wikipa` prints a single‑line progress indicator
+When scanning very large dumps, `ipadict` prints a single‑line progress indicator
 to **stderr** every N lines:
 
 ```text
@@ -226,7 +227,7 @@ Because progress goes to stderr, you can safely redirect the dictionary on
 stdout to a file:
 
 ```bash
-wikipa parse --lang fr dump.xml.bz2 > exports/fr.dict.txt
+ipadict parse --lang fr dump.xml.bz2 > exports/fr.dict.txt
 ```
 
 and still see progress in the terminal.
@@ -238,46 +239,46 @@ and still see progress in the terminal.
 ### Build a French dictionary from a local dump
 
 ```bash
-wikipa parse --lang fr   --export text   frwiktionary-20251120-pages-articles-multistream.xml.bz2   > exports/fr.dict.txt
+ipadict parse --lang fr   --export text   frwiktionary-20251120-pages-articles-multistream.xml.bz2   > exports/fr.dict.txt
 ```
 
 ### Build an English dictionary from a remote dump
 
 ```bash
-wikipa parse --lang en   https://dumps.wikimedia.org/enwiktionary/latest/enwiktionary-latest-pages-articles.xml.bz2   > exports/en.dict.txt
+ipadict parse --lang en   https://dumps.wikimedia.org/enwiktionary/latest/enwiktionary-latest-pages-articles.xml.bz2   > exports/en.dict.txt
 ```
 
 ### Merge a user dictionary (first) and a reference dump with append semantics
 
 ```bash
 # user.dict.txt contains hand‑edited pronunciations
-wikipa parse --lang fr   --preload exports/user.dict.txt   --merge-append   frwiktionary-latest-pages-articles.xml.bz2   > exports/fr.user_first.dict.txt
+ipadict parse --lang fr   --preload exports/user.dict.txt   --merge-append   frwiktionary-latest-pages-articles.xml.bz2   > exports/fr.user_first.dict.txt
 ```
 
 ### Merge a reference dictionary and then prepend user overrides
 
 ```bash
 # preload a large reference dict, prepend user overrides from a new dump
-wikipa parse --lang fr   --preload exports/reference.dict.txt   --merge-prepend   frwiktionary-user-overrides.xml.bz2   > exports/fr.overrides_first.dict.txt
+ipadict parse --lang fr   --preload exports/reference.dict.txt   --merge-prepend   frwiktionary-user-overrides.xml.bz2   > exports/fr.overrides_first.dict.txt
 ```
 
 ### Keep curated entries, only add missing words
 
 ```bash
-wikipa parse --lang fr   --preload exports/curated.dict.txt   --no-override   frwiktionary-latest-pages-articles.xml.bz2   > exports/fr.curated_plus_missing.dict.txt
+ipadict parse --lang fr   --preload exports/curated.dict.txt   --no-override   frwiktionary-latest-pages-articles.xml.bz2   > exports/fr.curated_plus_missing.dict.txt
 ```
 
 ### Let the new dump override an older dictionary
 
 ```bash
-wikipa parse --lang fr   --preload exports/old.dict.txt   --replace   frwiktionary-20251120-pages-articles-multistream.xml.bz2   > exports/fr.override_old.dict.txt
+ipadict parse --lang fr   --preload exports/old.dict.txt   --replace   frwiktionary-20251120-pages-articles-multistream.xml.bz2   > exports/fr.override_old.dict.txt
 ```
 
 ---
 
 ## Notes
 
-- `wikipa` is language‑agnostic as long as the dumps contain `{{pron|...}}` /
+- `ipadict` is language‑agnostic as long as the dumps contain `{{pron|...}}` /
   `{{API|...}}` templates with the language code as one of the parameters.
 - IPA detection uses the TIPA character set (`ipa.Charset`), which includes
   IPA and ExtIPA symbols, diacritics and suprasegmentals.

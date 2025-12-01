@@ -1,4 +1,4 @@
-module wikipa
+module ipadict
 
 go 1.25
 
