@@ -27,7 +27,7 @@ import (
 	"time"
 
 	"github.com/temporal-IPA/tipa/pkg/phono"
-	"github.com/temporal-IPA/tipa/pkg/phono/parser"
+	"github.com/temporal-IPA/tipa/pkg/phono/wikipedia"
 )
 
 // --- CLI help / usage -------------------------------------------------------
@@ -293,7 +293,7 @@ func runBuild(cfg buildConfig) error {
 		}
 
 		if isXMLWikipediaDumpSource(src) {
-			parser := parser.NewXMLWikipediaDump(lang, cfg.MergeMode)
+			parser := wikipedia.NewXMLDump(lang, cfg.MergeMode)
 			parser.Progress = func(lines, words, uniquePairs int) {
 				fmt.Fprintf(os.Stderr,
 					"\rScanning %s... lines: %d (words: %d, unique word/pron pairs: %d)",
