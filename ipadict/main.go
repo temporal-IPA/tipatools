@@ -26,8 +26,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/temporal-IPA/tipa/pkg/phonodict"
-	"github.com/temporal-IPA/tipa/pkg/phonodict/seqparser"
+	"github.com/temporal-IPA/tipa/pkg/phono"
+	"github.com/temporal-IPA/tipa/pkg/phono/parser"
 )
 
 // --- CLI help / usage -------------------------------------------------------
@@ -216,11 +216,11 @@ func writeGobDictionary(w io.Writer, entries map[string][]string) error {
 
 // buildConfig holds options for a full dictionary build.
 type buildConfig struct {
-	ParseSources []string            // sources passed via --parse (dumps or dictionaries)
-	PreloadPaths []string            // sources passed via --preload (always dictionaries)
-	ExportFormat string              // "text" or "gob"
-	Lang         string              // language code used in pron/API templates
-	MergeMode    phonodict.MergeMode // append, prepend, no-override, replace
+	ParseSources []string        // sources passed via --parse (dumps or dictionaries)
+	PreloadPaths []string        // sources passed via --preload (always dictionaries)
+	ExportFormat string          // "text" or "gob"
+	Lang         string          // language code used in pron/API templates
+	MergeMode    phono.MergeMode // append, prepend, no-override, replace
 }
 
 // stringSliceFlag implements flag.Value to allow repeated flags.
@@ -240,31 +240,22 @@ func isHTTPURL(src string) bool {
 	return strings.HasPrefix(src, "http://") || strings.HasPrefix(src, "https://")
 }
 
-// isDumpSource classifies pathOrURL as a Wiktionary/Wikipedia XML dump
+// isXMLWikipediaDumpSource classifies pathOrURL as a Wiktionary/Wikipedia XML dump
 // when its shape strongly suggests it.
-func isDumpSource(pathOrURL string) bool {
+func isXMLWikipediaDumpSource(pathOrURL string) bool {
 	if isHTTPURL(pathOrURL) {
 		return true
 	}
-
 	lower := strings.ToLower(pathOrURL)
-
 	if strings.HasSuffix(lower, ".xml") || strings.HasSuffix(lower, ".xml.bz2") {
 		return true
 	}
-
-	if strings.HasSuffix(lower, ".bz2") &&
-		(strings.Contains(lower, "wiktionary") ||
-			strings.Contains(lower, "wikipedia") ||
-			strings.Contains(lower, "wikimedia")) {
-		return true
-	}
-
 	return false
 }
 
 // runBuild executes a full build according to cfg and writes the result to stdout.
 func runBuild(cfg buildConfig) error {
+	fs := os.DirFS("/")
 	if len(cfg.ParseSources) == 0 && len(cfg.PreloadPaths) == 0 {
 		return errors.New("at least one --parse or --preload source must be specified")
 	}
@@ -282,11 +273,11 @@ func runBuild(cfg buildConfig) error {
 		lang = "fr"
 	}
 
-	rep := phonodict.NewRepresentation()
+	rep := phono.NewRepresentation()
 
 	// Step 1: preload dictionaries (always treated as dictionaries).
 	if len(cfg.PreloadPaths) > 0 {
-		if err := phonodict.PreloadInto(rep, cfg.MergeMode, cfg.PreloadPaths...); err != nil {
+		if err := phono.LoadInto(fs, rep, cfg.MergeMode, cfg.PreloadPaths...); err != nil {
 			return fmt.Errorf("preload %q: %w", strings.Join(cfg.PreloadPaths, ", "), err)
 		}
 	}
@@ -301,8 +292,8 @@ func runBuild(cfg buildConfig) error {
 			continue
 		}
 
-		if isDumpSource(src) {
-			parser := seqparser.NewXMLWikipediaDump(lang, cfg.MergeMode)
+		if isXMLWikipediaDumpSource(src) {
+			parser := parser.NewXMLWikipediaDump(lang, cfg.MergeMode)
 			parser.Progress = func(lines, words, uniquePairs int) {
 				fmt.Fprintf(os.Stderr,
 					"\rScanning %s... lines: %d (words: %d, unique word/pron pairs: %d)",
@@ -322,7 +313,7 @@ func runBuild(cfg buildConfig) error {
 				src, stats.Lines, len(rep.Entries), len(rep.SeenWordPron), stats.Elapsed.Seconds())
 		} else {
 			// Treat as dictionary source, using phonodict preloaders.
-			if err := phonodict.PreloadInto(rep, cfg.MergeMode, src); err != nil {
+			if err := phono.LoadInto(fs, rep, cfg.MergeMode, src); err != nil {
 				return fmt.Errorf("preload %q: %w", src, err)
 			}
 		}
@@ -382,23 +373,23 @@ func runFromArgs(args []string) error {
 		return err
 	}
 
-	mode := phonodict.MergeModeAppend
+	mode := phono.MergeModeAppend
 	selected := 0
 
 	if *mergeFlag || *mergeAppendFlag {
-		mode = phonodict.MergeModeAppend
+		mode = phono.MergeModeAppend
 		selected++
 	}
 	if *mergePrependFlag {
-		mode = phonodict.MergeModePrepend
+		mode = phono.MergeModePrepend
 		selected++
 	}
 	if *noOverrideFlag || *noOverrideCompat {
-		mode = phonodict.MergeModeNoOverride
+		mode = phono.MergeModeNoOverride
 		selected++
 	}
 	if *replaceFlag {
-		mode = phonodict.MergeModeReplace
+		mode = phono.MergeModeReplace
 		selected++
 	}
 
