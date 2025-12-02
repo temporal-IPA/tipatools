@@ -9,7 +9,8 @@
 //   - export the resulting dictionary as text or gob.
 //
 // Wikipedia / Wiktionary is treated as a major, high-coverage source, but the
-// tool can also layer additional dictionaries via --preload and merge modes.
+// tool can also layer additional dictionaries via --preload / --parse and
+// merge modes.
 
 package main
 
@@ -23,6 +24,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/temporal-IPA/tipa/pkg/phonodict"
 	"github.com/temporal-IPA/tipa/pkg/phonodict/seqparser"
@@ -36,11 +38,38 @@ Usage:
   ipadict help
       Print this help message.
 
-  ipadict parse [flags] <path-or-URL>
-      Build an IPA dictionary from a primary source (by default: a
-      Wiktionary / Wikipedia XML dump) and optional preloaded dictionaries.
+  ipadict [flags] --parse <path-or-URL> [--parse <path-or-URL> ...]
+      Build an IPA dictionary from one or more sources (Wiktionary /
+      Wikipedia XML dumps, existing dictionaries, or a mix of both).
 
-Flags for "parse":
+Sources:
+
+  --parse PATH
+      Add a source to the pipeline. This flag can be repeated; sources
+      are processed in the order they appear on the command line.
+
+      Each PATH can be:
+        - a Wiktionary / Wikipedia XML dump:
+            *.xml
+            *.xml.bz2
+            *wiktionary*.bz2
+            *wikipedia*.bz2
+          (local file or HTTP/HTTPS URL), or
+        - a pre-existing dictionary:
+            - native ipadict text:
+                <word>\t<IPA1> | <IPA2> | ...
+            - gob (map[string][]string) produced by "--export gob"
+            - "ipa-dict" style slashed text:
+                <word>\t/<IPA>/
+                <word>\t/<IPA1>/ /<IPA2>/
+
+  --preload PATH
+      Preload an existing dictionary before any --parse sources.
+      The flag can be repeated; dictionaries are merged in the order
+      they are given. It accepts the same dictionary formats as
+      --parse, but is always treated as a dictionary (never as a dump).
+
+Flags:
   --lang CODE
       Language code to match in {{pron|...}} / {{API|...}} templates when
       scanning Wikimedia dumps.
@@ -58,23 +87,12 @@ Flags for "parse":
       Export a binary encoding (encoding/gob) of a map[string][]string to stdout.
       This is useful for fast re-loading inside Go tools.
       Example:
-          ipadict parse --export gob dump.xml.bz2 > fr.dict.gob
+          ipadict --lang fr --export gob --parse dump.xml.bz2 > fr.dict.gob
 
   --preload PATH
-      Preload an existing dictionary before scanning <path-or-URL>.
+      Preload an existing dictionary before any --parse sources.
       This flag can be used multiple times; dictionaries are preloaded
       and merged in the order they are given.
-      PATH can be:
-        - a text dictionary produced by this tool (ipa_text):
-            <word>\t<IPA1> | <IPA2> | ...
-        - a gob file produced by "ipadict parse --export gob" (ipa_gob), or
-        - an external text dictionary using "ipa_dict_txt" encoding:
-            <word>\t/<IPA>/
-            <word>\t/<IPA1>/ /<IPA2>/ ...
-
-      The loader automatically sniffs the format from the first few
-      kilobytes of each file and converts it to the internal
-      representation before merging.
 
   --merge-append
       Merge new pronunciations into the existing dictionary by appending them
@@ -83,7 +101,7 @@ Flags for "parse":
 
   --merge-prepend
       Merge new pronunciations by prepending them before existing entries for
-      each word. This is useful when the newly parsed dump should have higher
+      each word. This is useful when the newly parsed source should have higher
       priority than the preloaded dictionaries.
 
   --merge
@@ -96,14 +114,15 @@ Flags for "parse":
 
   --replace
       Replace entries for words that already exist in the preloaded
-      dictionaries. As soon as a word appears in the new dump, its existing
+      dictionaries. As soon as a word appears in a new source, its existing
       pronunciations from the preloaded dictionaries are discarded and the
       new pronunciations become the reference set.
 
-Input formats for <path-or-URL>:
+Input formats for --parse:
   - Local files:
       - Plain XML dumps:  *.xml
-      - Bzip2-compressed: *.xml.bz2, *.bz2
+      - Bzip2-compressed: *.xml.bz2, *wiktionary*.bz2, *wikipedia*.bz2
+      - Text or gob dictionaries as described above.
   - HTTP/HTTPS:
       When <path-or-URL> starts with "http://" or "https://", the dump is read
       directly from the HTTP response body as a stream. If the URL path ends
@@ -112,25 +131,47 @@ Input formats for <path-or-URL>:
 
 Examples:
   # Basic local scan (French, text export)
-  ipadict parse --lang fr frwiktionary-latest-pages-articles.xml.bz2 > exports/fr.dict.txt
+  ipadict --lang fr \
+          --parse frwiktionary-latest-pages-articles.xml.bz2 \
+          --export text \
+          > exports/fr.dict.txt
 
   # English Wiktionary dictionary
-  ipadict parse --lang en enwiktionary-latest-pages-articles.xml.bz2 > exports/en.dict.txt
+  ipadict --lang en \
+          --parse enwiktionary-latest-pages-articles.xml.bz2 \
+          --export text \
+          > exports/en.dict.txt
 
   # Explicit gob export
-  ipadict parse --lang fr --export gob frwiktionary-latest-pages-articles.xml.bz2 > exports/fr.dict.gob
+  ipadict --lang fr --export gob \
+          --parse frwiktionary-latest-pages-articles.xml.bz2 \
+          > exports/fr.dict.gob
 
   # Merge existing French dictionaries with a new dump (append new pronunciations)
-  ipadict parse --lang fr --preload exports/old.dict.txt --preload exports/custom.dict.txt --merge-append frwiktionary-new-pages-articles.xml.bz2 > exports/merged.dict.txt
+  ipadict --lang fr --merge-append \
+          --preload exports/old.dict.txt \
+          --preload exports/custom.dict.txt \
+          --parse frwiktionary-new-pages-articles.xml.bz2 \
+          > exports/merged.dict.txt
 
   # Do not touch words that already exist in the preloaded dictionaries
-  ipadict parse --lang fr --preload exports/curated.dict.txt --no-override frwiktionary-latest-pages-articles.xml.bz2 > exports/fr.curated_plus_missing.dict.txt
+  ipadict --lang fr --no-override \
+          --preload exports/curated.dict.txt \
+          --parse frwiktionary-latest-pages-articles.xml.bz2 \
+          > exports/fr.curated_plus_missing.dict.txt
 
   # Replace existing entries with new pronunciations when available
-  ipadict parse --lang fr --preload exports/old.dict.txt --replace frwiktionary-20251120-pages-articles-multistream.xml.bz2 > exports/fr.override_old.dict.txt
+  ipadict --lang fr --replace \
+          --preload exports/old.dict.txt \
+          --parse frwiktionary-20251120-pages-articles-multistream.xml.bz2 \
+          > exports/fr.override_old.dict.txt
 
-  # Stream directly from Wikimedia dumps over HTTPS
-  ipadict parse --lang fr https://dumps.wikimedia.org/frwiktionary/latest/frwiktionary-latest-pages-articles.xml.bz2 > exports/fr.dict.txt
+  # Single-pass build from a dump and an external ipa-dict text file
+  ipadict --lang fr --merge-append \
+          --parse frwiktionary-20251120-pages-articles-multistream.xml \
+          --parse datasets/ipa-dict/fr_FR.txt \
+          --export text \
+          > exports/fr.full.dict.txt
 `
 
 // printUsage writes the CLI help text to the given writer.
@@ -173,11 +214,11 @@ func writeGobDictionary(w io.Writer, entries map[string][]string) error {
 
 // --- CLI wiring -------------------------------------------------------------
 
-// parseConfig holds options for the "parse" subcommand.
-type parseConfig struct {
-	Source       string              // path or URL
+// buildConfig holds options for a full dictionary build.
+type buildConfig struct {
+	ParseSources []string            // sources passed via --parse (dumps or dictionaries)
+	PreloadPaths []string            // sources passed via --preload (always dictionaries)
 	ExportFormat string              // "text" or "gob"
-	PreloadPaths []string            // optional, may be empty (can be specified multiple times)
 	Lang         string              // language code used in pron/API templates
 	MergeMode    phonodict.MergeMode // append, prepend, no-override, replace
 }
@@ -194,10 +235,38 @@ func (s *stringSliceFlag) Set(value string) error {
 	return nil
 }
 
-// runParse executes a parse according to cfg and writes the result to stdout.
-func runParse(cfg parseConfig) error {
-	if cfg.Source == "" {
-		return errors.New("missing <path-or-URL> argument")
+// isHTTPURL returns true if src looks like an HTTP or HTTPS URL.
+func isHTTPURL(src string) bool {
+	return strings.HasPrefix(src, "http://") || strings.HasPrefix(src, "https://")
+}
+
+// isDumpSource classifies pathOrURL as a Wiktionary/Wikipedia XML dump
+// when its shape strongly suggests it.
+func isDumpSource(pathOrURL string) bool {
+	if isHTTPURL(pathOrURL) {
+		return true
+	}
+
+	lower := strings.ToLower(pathOrURL)
+
+	if strings.HasSuffix(lower, ".xml") || strings.HasSuffix(lower, ".xml.bz2") {
+		return true
+	}
+
+	if strings.HasSuffix(lower, ".bz2") &&
+		(strings.Contains(lower, "wiktionary") ||
+			strings.Contains(lower, "wikipedia") ||
+			strings.Contains(lower, "wikimedia")) {
+		return true
+	}
+
+	return false
+}
+
+// runBuild executes a full build according to cfg and writes the result to stdout.
+func runBuild(cfg buildConfig) error {
+	if len(cfg.ParseSources) == 0 && len(cfg.PreloadPaths) == 0 {
+		return errors.New("at least one --parse or --preload source must be specified")
 	}
 
 	export := strings.ToLower(strings.TrimSpace(cfg.ExportFormat))
@@ -213,36 +282,53 @@ func runParse(cfg parseConfig) error {
 		lang = "fr"
 	}
 
-	var rep *phonodict.Representation
+	rep := phonodict.NewRepresentation()
 
-	// Optionally preload one or more dictionaries (text, gob, ipa_dict_txt)
-	// before scanning the dump.
+	// Step 1: preload dictionaries (always treated as dictionaries).
 	if len(cfg.PreloadPaths) > 0 {
-		entries, seenWordPron, preloadedWords, err := phonodict.PreloadPaths(cfg.MergeMode, cfg.PreloadPaths...)
-		if err != nil {
+		if err := phonodict.PreloadInto(rep, cfg.MergeMode, cfg.PreloadPaths...); err != nil {
 			return fmt.Errorf("preload %q: %w", strings.Join(cfg.PreloadPaths, ", "), err)
 		}
-		rep = &phonodict.Representation{
-			Entries:        entries,
-			SeenWordPron:   seenWordPron,
-			PreloadedWords: preloadedWords,
+	}
+
+	// Step 2: process --parse sources in order.
+	var totalLines int
+	var totalElapsed time.Duration
+
+	for _, src := range cfg.ParseSources {
+		src = strings.TrimSpace(src)
+		if src == "" {
+			continue
 		}
-	} else {
-		rep = phonodict.NewRepresentation()
+
+		if isDumpSource(src) {
+			parser := seqparser.NewXMLWikipediaDump(lang, cfg.MergeMode)
+			parser.Progress = func(lines, words, uniquePairs int) {
+				fmt.Fprintf(os.Stderr,
+					"\rScanning %s... lines: %d (words: %d, unique word/pron pairs: %d)",
+					src, lines, len(rep.Entries), len(rep.SeenWordPron))
+			}
+
+			stats, err := parser.ParseSource(src, rep)
+			if err != nil {
+				return fmt.Errorf("scan %q: %w", src, err)
+			}
+
+			totalLines += stats.Lines
+			totalElapsed += stats.Elapsed
+
+			fmt.Fprintf(os.Stderr,
+				"\rFinished %s. Scanned lines: %d (words: %d, unique word/pron pairs: %d, elapsed: %.3f seconds)\n",
+				src, stats.Lines, len(rep.Entries), len(rep.SeenWordPron), stats.Elapsed.Seconds())
+		} else {
+			// Treat as dictionary source, using phonodict preloaders.
+			if err := phonodict.PreloadInto(rep, cfg.MergeMode, src); err != nil {
+				return fmt.Errorf("preload %q: %w", src, err)
+			}
+		}
 	}
 
-	parser := seqparser.NewXMLWikipediaDump(lang, cfg.MergeMode)
-	parser.Progress = func(lines, words, uniquePairs int) {
-		fmt.Fprintf(os.Stderr,
-			"\rScanning... lines: %d (words: %d, unique word/pron pairs: %d)",
-			lines, words, uniquePairs)
-	}
-
-	stats, err := parser.ParseSource(cfg.Source, rep)
-	if err != nil {
-		return fmt.Errorf("scan %q: %w", cfg.Source, err)
-	}
-
+	// Step 3: export dictionary.
 	switch export {
 	case "text":
 		if err := writeTextDictionary(os.Stdout, rep.Entries); err != nil {
@@ -255,21 +341,23 @@ func runParse(cfg parseConfig) error {
 	}
 
 	fmt.Fprintf(os.Stderr,
-		"\rFinished. Scanned lines: %d (words: %d, unique word/pron pairs: %d, elapsed: %.3f seconds)\n",
-		stats.Lines, stats.Words, stats.UniquePairs, stats.Elapsed.Seconds())
+		"Finished. Scanned lines: %d (words: %d, unique word/pron pairs: %d, total elapsed: %.3f seconds)\n",
+		totalLines, len(rep.Entries), len(rep.SeenWordPron), totalElapsed.Seconds())
 
 	return nil
 }
 
-// runParseFromArgs parses flags/positional arguments for the "parse"
-// subcommand and delegates to runParse.
-func runParseFromArgs(args []string) error {
-	fs := flag.NewFlagSet("parse", flag.ContinueOnError)
+// runFromArgs parses flags/positional arguments and delegates to runBuild.
+func runFromArgs(args []string) error {
+	fs := flag.NewFlagSet("ipadict", flag.ContinueOnError)
 
 	exportFormat := fs.String("export", "text", "export format: text or gob")
 
+	var parseSources stringSliceFlag
+	fs.Var(&parseSources, "parse", "source to parse (dump or dictionary). Can be repeated; order matters.")
+
 	var preloadPaths stringSliceFlag
-	fs.Var(&preloadPaths, "preload", "optional dictionary to preload (text, gob, ipa_dict_txt). Can be repeated.")
+	fs.Var(&preloadPaths, "preload", "dictionary to preload before any --parse sources (text, gob, ipa_dict_txt). Can be repeated.")
 
 	lang := fs.String("lang", "fr", "language code to match in pron/API templates (e.g. fr, en, es, de)")
 
@@ -282,6 +370,9 @@ func runParseFromArgs(args []string) error {
 	replaceFlag := fs.Bool("replace", false, "replace entries for words that already exist in the preloaded dictionary")
 
 	fs.SetOutput(os.Stderr)
+	fs.Usage = func() {
+		printUsage(os.Stderr)
+	}
 
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -289,11 +380,6 @@ func runParseFromArgs(args []string) error {
 			return nil
 		}
 		return err
-	}
-
-	remaining := fs.Args()
-	if len(remaining) != 1 {
-		return errors.New(`"parse" expects exactly one <path-or-URL> argument`)
 	}
 
 	mode := phonodict.MergeModeAppend
@@ -320,34 +406,27 @@ func runParseFromArgs(args []string) error {
 		return errors.New("only one of --merge/--merge-append, --merge-prepend, --no-override/--no-overide, or --replace may be specified")
 	}
 
-	cfg := parseConfig{
-		Source:       strings.TrimSpace(remaining[0]),
-		ExportFormat: strings.TrimSpace(*exportFormat),
+	cfg := buildConfig{
+		ParseSources: parseSources,
 		PreloadPaths: preloadPaths,
+		ExportFormat: strings.TrimSpace(*exportFormat),
 		Lang:         strings.TrimSpace(*lang),
 		MergeMode:    mode,
 	}
 
-	return runParse(cfg)
+	return runBuild(cfg)
 }
 
 func main() {
-	if len(os.Args) < 2 {
-		printUsage(os.Stderr)
-		os.Exit(1)
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "help", "-h", "--help":
+			printUsage(os.Stdout)
+			return
+		}
 	}
 
-	switch os.Args[1] {
-	case "help", "-h", "--help":
-		printUsage(os.Stdout)
-		return
-	case "parse":
-		if err := runParseFromArgs(os.Args[2:]); err != nil {
-			log.Fatal(err)
-		}
-	default:
-		log.Printf("Unknown subcommand %q\n\n", os.Args[1])
-		printUsage(os.Stderr)
-		os.Exit(1)
+	if err := runFromArgs(os.Args[1:]); err != nil {
+		log.Fatal(err)
 	}
 }
