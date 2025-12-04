@@ -232,7 +232,7 @@ func composeText(res g2p.Result) string {
 	for _, f := range res.Fragments {
 		segs = append(segs, segment{
 			pos:  f.Pos,
-			text: string(f.IPA),
+			text: string(f.Phonetized),
 		})
 	}
 	for _, rt := range res.RawTexts {
